@@ -1,0 +1,1 @@
+docker run --rm -dit mcr.microsoft.com/vscode/devcontainers/go:1.20 bash
