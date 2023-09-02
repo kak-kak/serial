@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -27,7 +28,7 @@ func calculationStage(packets <-chan reciever.Packet) chan calculatorAdapter.Est
 	return estimates
 }
 
-func serialSendingStage(estimates <-chan calculatorAdapter.Estimate, sm *serialManager.SerialManagement) {
+func serialSendingStage(estimates <-chan calculatorAdapter.Estimate, sm serialManager.SerialManager) {
 	serialSender := sender.NewSerialSender(sm)
 	go func() {
 		for estimate := range estimates {
@@ -43,7 +44,9 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	serialManagement, err := serialManager.NewSerialManagement(&serial.Config{
+	var serialManagement serialManager.SerialManager
+	var err error
+	serialManagement, err = serialManager.NewSerialManagement(&serial.Config{
 		Name: "/dev/tty99",
 		Baud: 9600,
 	})
@@ -56,7 +59,7 @@ func main() {
 	estimates := calculationStage(packets)
 	serialSendingStage(estimates, serialManagement)
 
-	go reciever.Listen(packets, serialManagement)
+	go reciever.Listen(context.Background(), packets, serialManagement)
 
 	func() {
 		<-sigChan

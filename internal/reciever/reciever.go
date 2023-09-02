@@ -1,7 +1,7 @@
 package reciever
 
 import (
-	"bytes"
+	"context"
 	"io"
 	"log"
 	"serial/internal/serialManager"
@@ -17,18 +17,27 @@ func GetFooter() []byte {
 	return []byte{0xAA}
 }
 
+func GetPacketLength() int {
+	return 50
+}
+
 type Packet struct {
 	Header []byte
 	Data   []byte
 	Footer []byte
 }
 
-func Listen(packets chan<- Packet, sm serialManager.SerialManager) {
-	defer sm.Close()
-	buffer := make([]byte, 0)
-	func() {
-		for {
-			b := make([]byte, 10)
+func Listen(ctx context.Context, packets chan<- Packet, sm serialManager.SerialManager) {
+	buffer := make([]byte, 0, 10000)
+
+	log.SetFlags(log.Lmicroseconds)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			b := make([]byte, 10000)
 			n, err := sm.Read(b)
 			if err != nil {
 				if err == io.EOF {
@@ -39,37 +48,71 @@ func Listen(packets chan<- Packet, sm serialManager.SerialManager) {
 			}
 
 			buffer = append(buffer, b[:n]...)
-
-			if packet, rest, found := TryParsePacket(buffer); found {
-				packets <- packet
-				buffer = rest
-			}
+			buffer = TryParsePacket(buffer, packets)
 		}
-	}()
+	}
 }
 
-func TryParsePacket(buffer []byte) (Packet, []byte, bool) {
-	headerIndex := bytes.Index(buffer, GetHeader())
-	if headerIndex == -1 {
-		return Packet{}, buffer, false
+func TryParsePacket(buffer []byte, packets chan<- Packet) []byte {
+	header := GetHeader()
+	footer := GetFooter()
+	headerLength := len(header)
+	footerLength := len(footer)
+	packetLength := GetPacketLength()
+
+	// Maintain a start index
+	startIdx := 0
+	i_max := len(buffer)
+
+	for startIdx < i_max {
+		// Check header
+		if i_max-startIdx < headerLength || !equal(buffer[startIdx:startIdx+headerLength], header) {
+			startIdx++
+			continue
+		}
+
+		// Check packet size
+		if i_max-startIdx < packetLength {
+			break
+		}
+
+		// Check footer
+		if !equal(buffer[startIdx+packetLength-footerLength:startIdx+packetLength], footer) {
+			startIdx++
+			continue
+		}
+
+		// Create and send packet
+		packet := Packet{
+			Header: header,
+			Data:   buffer[startIdx+headerLength : startIdx+packetLength-footerLength],
+			Footer: footer,
+		}
+		log.Println("Packet received")
+		packets <- packet
+
+		// Increment the start index by the packet length
+		startIdx += packetLength
 	}
 
-	footerIndex := bytes.Index(buffer[headerIndex:], GetFooter())
-	if footerIndex == -1 {
-		return Packet{}, buffer, false
+	// If the start index has moved, remove the parsed data from the buffer
+	if startIdx > 0 {
+		copy(buffer, buffer[startIdx:])
+		buffer = buffer[:i_max-startIdx]
 	}
 
-	packetEndIndex := headerIndex + footerIndex + len(GetFooter())
-	if packetEndIndex > len(buffer) {
-		return Packet{}, buffer, false
-	}
+	return buffer
+}
 
-	packet := Packet{
-		Header: GetHeader(),
-		Data:   buffer[headerIndex+len(GetHeader()) : footerIndex],
-		Footer: GetFooter(),
+// New equal function to avoid creating subslices
+func equal(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	rest := buffer[packetEndIndex:]
-
-	return packet, rest, true
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }

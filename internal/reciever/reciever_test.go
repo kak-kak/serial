@@ -1,127 +1,91 @@
 package reciever
 
 import (
-	"bytes"
-	"reflect"
+	"context"
+	"log"
+	"math/rand"
+	"serial/internal/serialManager"
 	"testing"
+	"time"
 )
 
-type MockSerialManagement struct {
-	data []byte
-	pos  int
+func TestListenWith(t *testing.T) {
+	// Make random data for n_packets packets
+	packetLength := GetPacketLength()
+	var n_packets int
+	var maxByteToReadInOnce int
+	n_packets = 1000
+	maxByteToReadInOnce = int(float32(packetLength))
+	testListenWithRandomDataByPattern(n_packets, maxByteToReadInOnce, t)
 }
 
-func (m *MockSerialManagement) Close() error {
-	return nil
+func TestListenWithRandomData1(t *testing.T) {
+	// Make random data for n_packets packets
+	packetLength := GetPacketLength()
+	var n_packets int
+	var maxByteToReadInOnce int
+	n_packets = 1000
+	maxByteToReadInOnce = int(float32(packetLength) * 0.5)
+	testListenWithRandomDataByPattern(n_packets, maxByteToReadInOnce, t)
 }
 
-func (m *MockSerialManagement) Read(b []byte) (int, error) {
-	if m.pos >= len(m.data) {
-		return 0, nil
-	}
-	n := copy(b, m.data[m.pos:])
-	m.pos += n
-	return n, nil
+func TestListenWithRandomData2(t *testing.T) {
+	// Make random data for n_packets packets
+	packetLength := GetPacketLength()
+	var n_packets int
+	var maxByteToReadInOnce int
+	n_packets = 1000
+	maxByteToReadInOnce = int(float32(packetLength) * 5)
+	testListenWithRandomDataByPattern(n_packets, maxByteToReadInOnce, t)
 }
 
-func (m *MockSerialManagement) Write(b []byte) (int, error) {
-	return len(b), nil
+func testListenWithRandomDataByPattern(n_packets int, maxByteToReadInOnce int, t *testing.T) {
+	// n_packets = n_packets
+
+	data := make([]byte, 0, n_packets*GetPacketLength())
+	for i := 0; i < n_packets; i++ {
+		data = append(data, GetHeader()...)
+		data = append(data, randomBytes(GetPacketLength()-len(GetHeader())-len(GetFooter()))...)
+		data = append(data, GetFooter()...)
+	}
+
+	data = data[3 : len(data)-3]
+
+	slicePoint1 := n_packets * GetPacketLength() / 4
+	slicePoint2 := n_packets * GetPacketLength() / 4 * 2
+	slicePoint3 := n_packets * GetPacketLength() / 4 * 3
+	data = append(data[:slicePoint1], data[slicePoint1+1:]...)
+	data = append(data[:slicePoint2], data[slicePoint2+1:]...)
+	data = append(data[:slicePoint3], data[slicePoint3+1:]...)
+
+	sm := serialManager.NewMockSerialManager(data, maxByteToReadInOnce)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	packets := make(chan Packet, int(float32(n_packets)*1.1))
+
+	go func() {
+		Listen(ctx, packets, sm)
+		close(packets)
+	}()
+
+	count := 0
+	for range packets {
+		count++
+		log.Printf("count %d", count)
+	}
+
+	n_packets = n_packets - 5 // 5 packets are removed by slicePoint1, slicePoint2, slicePoint3
+	if count != n_packets {
+		t.Fatalf("expected n_packets %d packets, got %d", n_packets, count)
+	}
 }
 
-func TestListen(t *testing.T) {
-	packetsData := make([]byte, 0)
-	packetsData = append(packetsData, append(append(GetHeader(), []byte{0x01, 0x02, 0x03}...), GetFooter()...)...)
-	packetsData = append(packetsData, append(append(GetHeader(), []byte{0x04, 0x05, 0x06}...), GetFooter()...)...)
-
-	sm := &MockSerialManagement{
-		data: packetsData,
+func randomBytes(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(rand.Intn(256))
 	}
-
-	packets := make(chan Packet, 2)
-	go Listen(packets, sm)
-
-	p := <-packets
-	if !bytes.Equal(p.Header, GetHeader()) {
-		t.Errorf("expected header to be %v, got %v", GetHeader(), p.Header)
-	}
-	if !bytes.Equal(p.Data, []byte{0x01, 0x02, 0x03}) {
-		t.Errorf("expected data to be %v, got %v", []byte{0x01, 0x02, 0x03}, p.Data)
-	}
-	if !bytes.Equal(p.Footer, GetFooter()) {
-		t.Errorf("expected footer to be %v, got %v", GetFooter(), p.Footer)
-	}
-
-	p = <-packets
-	if !bytes.Equal(p.Header, GetHeader()) {
-		t.Errorf("expected header to be %v, got %v", GetHeader(), p.Header)
-	}
-	if !bytes.Equal(p.Data, []byte{0x04, 0x05, 0x06}) {
-		t.Errorf("expected data to be %v, got %v", []byte{0x04, 0x05, 0x06}, p.Data)
-	}
-
-	if !bytes.Equal(p.Footer, GetFooter()) {
-		t.Errorf("expected footer to be %v, got %v", GetFooter(), p.Footer)
-	}
-}
-
-func TestTryParsePacket(t *testing.T) {
-	tests := []struct {
-		name  string
-		input []byte
-		want  Packet
-		rest  []byte
-		found bool
-	}{
-		{
-			name:  "valid packet",
-			input: append(append(GetHeader(), []byte{0x01, 0x02, 0x03}...), GetFooter()...),
-			want: Packet{
-				Header: GetHeader(),
-				Data:   []byte{0x01, 0x02, 0x03},
-				Footer: GetFooter(),
-			},
-			rest:  []byte{},
-			found: true,
-		},
-		{
-			name:  "packet with trailing data",
-			input: append(append(GetHeader(), []byte{0x01, 0x02, 0x03}...), append(GetFooter(), []byte{0x04, 0x05, 0x06}...)...),
-			want: Packet{
-				Header: GetHeader(),
-				Data:   []byte{0x01, 0x02, 0x03},
-				Footer: GetFooter(),
-			},
-			rest:  []byte{0x04, 0x05, 0x06},
-			found: true,
-		},
-		{
-			name:  "no header",
-			input: append([]byte{0x01, 0x02, 0x03}, GetFooter()...),
-			want:  Packet{},
-			rest:  append([]byte{0x01, 0x02, 0x03}, GetFooter()...),
-			found: false,
-		},
-		{
-			name:  "no footer",
-			input: append(GetHeader(), []byte{0x01, 0x02, 0x03}...),
-			want:  Packet{},
-			rest:  append(GetHeader(), []byte{0x01, 0x02, 0x03}...),
-			found: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, rest, found := TryParsePacket(tt.input)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("TryParsePacket() got = %v, want %v", got, tt.want)
-			}
-			if !bytes.Equal(rest, tt.rest) {
-				t.Errorf("TryParsePacket() rest = %v, want %v", rest, tt.rest)
-			}
-			if found != tt.found {
-				t.Errorf("TryParsePacket() found = %v, want %v", found, tt.found)
-			}
-		})
-	}
+	return b
 }
